@@ -1,5 +1,7 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from cogs.anti_nuke import AntiNukeCog
@@ -66,6 +68,54 @@ class AntiNukeCogTests(unittest.TestCase):
         member, action, reason = appeals_cog.sent[0]
         self.assertIs(member, moderator)
         self.assertEqual(action, "anti-nuked")
+
+    def test_settings_persist_to_sqlite(self) -> None:
+        async def scenario() -> None:
+            tmp = tempfile.TemporaryDirectory()
+            try:
+                db_path = Path(tmp.name) / "anti_nuke.db"
+
+                # First cog: save custom thresholds against the temp database.
+                cog = AntiNukeCog.__new__(AntiNukeCog)
+                cog._db_path = db_path
+                cog._connection = None
+                cog._thresholds = {}
+                cog._windows = {}
+                await cog._initialize_db()
+                await cog._set_settings(10, 5, 60)
+                # Overwrite the same guild to exercise the ON CONFLICT upsert path.
+                await cog._set_settings(10, 8, 45)
+                await cog._connection.close()
+
+                # Fresh cog simulates a restart: thresholds must be reloaded.
+                cog2 = AntiNukeCog.__new__(AntiNukeCog)
+                cog2._db_path = db_path
+                cog2._connection = None
+                await cog2._initialize_db()
+                await cog2._load_settings()
+
+                self.assertEqual(cog2._threshold_for(10), 8)
+                self.assertEqual(cog2._window_for(10), 45)
+                # Guilds without saved settings fall back to defaults.
+                self.assertEqual(cog2._threshold_for(999), 3)
+                self.assertEqual(cog2._window_for(999), 10)
+
+                # Reset must also persist.
+                await cog2._reset_settings(10)
+                await cog2._connection.close()
+
+                cog3 = AntiNukeCog.__new__(AntiNukeCog)
+                cog3._db_path = db_path
+                cog3._connection = None
+                await cog3._initialize_db()
+                await cog3._load_settings()
+                self.assertEqual(cog3._threshold_for(10), 3)
+                self.assertEqual(cog3._window_for(10), 10)
+                await cog3._connection.close()
+            finally:
+                tmp.cleanup()
+
+        asyncio.run(scenario())
 
     def test_trigger_tolerates_missing_appeals_cog(self) -> None:
         class DummyModerator:

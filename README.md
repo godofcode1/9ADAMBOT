@@ -52,8 +52,8 @@ In the project's **Variables** tab, add:
 ### Step 4 — Add a persistent volume
 
 Railway's filesystem is **wiped on every redeploy**, so the SQLite databases
-(`moderation.db` for warnings, `filter.db` for filter settings) must live on a
-persistent volume:
+(`moderation.db` for warnings, `filter.db` for filter settings and exclusions,
+`anti_nuke.db` for anti-nuke thresholds) must live on a persistent volume:
 
 1. Open your service → **Volumes** tab.
 2. Click **New Volume**, mount it at `/data`, and give it a reasonable size (1 GB is plenty).

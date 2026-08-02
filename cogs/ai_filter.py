@@ -75,9 +75,21 @@ class AIFilterCog(commands.Cog, name="AI Filter"):
         return user_id in self.excluded_users.get(guild_id, set())
 
     async def _add_exclusion(self, guild_id: int, user_id: int) -> None:
+        conn = await self._get_connection()
+        await conn.execute(
+            "INSERT OR IGNORE INTO filter_exclusions (guild_id, user_id) VALUES (?, ?)",
+            (guild_id, user_id),
+        )
+        await conn.commit()
         self.excluded_users.setdefault(guild_id, set()).add(user_id)
 
     async def _remove_exclusion(self, guild_id: int, user_id: int) -> None:
+        conn = await self._get_connection()
+        await conn.execute(
+            "DELETE FROM filter_exclusions WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        await conn.commit()
         exclusions = self.excluded_users.get(guild_id)
         if exclusions is None:
             return
@@ -109,6 +121,15 @@ class AIFilterCog(commands.Cog, name="AI Filter"):
             )
             """
         )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS filter_exclusions (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
         await self._connection.commit()
 
     async def _get_connection(self) -> aiosqlite.Connection:
@@ -118,7 +139,7 @@ class AIFilterCog(commands.Cog, name="AI Filter"):
         return self._connection
 
     async def _load_settings(self) -> None:
-        """Load per-guild enabled flags and custom words into memory."""
+        """Load per-guild enabled flags, custom words, and exclusions into memory."""
         conn = await self._get_connection()
         async with conn.execute("SELECT guild_id, enabled FROM filter_settings") as cursor:
             settings_rows = await cursor.fetchall()
@@ -131,6 +152,12 @@ class AIFilterCog(commands.Cog, name="AI Filter"):
             word_rows = await cursor.fetchall()
         for row in word_rows:
             self._custom_words.setdefault(int(row["guild_id"]), set()).add(str(row["word"]))
+
+        self.excluded_users = {}
+        async with conn.execute("SELECT guild_id, user_id FROM filter_exclusions") as cursor:
+            exclusion_rows = await cursor.fetchall()
+        for row in exclusion_rows:
+            self.excluded_users.setdefault(int(row["guild_id"]), set()).add(int(row["user_id"]))
 
     async def _is_filter_enabled(self, guild_id: int) -> bool:
         return guild_id not in self._disabled_guilds

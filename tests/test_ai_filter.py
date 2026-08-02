@@ -1,5 +1,7 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 
 from cogs.ai_filter import AIFilterCog
 
@@ -220,6 +222,52 @@ class AIFilterCogTests(unittest.TestCase):
 
         self.assertTrue(cog._contains_obvious_slur("you are a n1gga", 10))
         self.assertTrue(cog._contains_obvious_slur("you are a nigga", 10))
+
+    def test_exclusions_persist_to_sqlite(self) -> None:
+        async def scenario() -> None:
+            tmp = tempfile.TemporaryDirectory()
+            try:
+                db_path = Path(tmp.name) / "filter.db"
+
+                # First cog: add exclusions against the temp database.
+                cog = AIFilterCog.__new__(AIFilterCog)
+                cog.excluded_users = {}
+                cog._db_path = db_path
+                cog._connection = None
+                await cog._initialize_db()
+                await cog._add_exclusion(10, 1001)
+                await cog._add_exclusion(10, 1002)
+                await cog._add_exclusion(20, 2001)
+                await cog._connection.close()
+
+                # Fresh cog simulates a restart: settings must be reloaded from disk.
+                cog2 = AIFilterCog.__new__(AIFilterCog)
+                cog2.excluded_users = {}
+                cog2._db_path = db_path
+                cog2._connection = None
+                await cog2._initialize_db()
+                await cog2._load_settings()
+
+                self.assertEqual(cog2.excluded_users.get(10, set()), {1001, 1002})
+                self.assertEqual(cog2.excluded_users.get(20, set()), {2001})
+
+                # Removing an exclusion must also persist.
+                await cog2._remove_exclusion(10, 1001)
+                await cog2._connection.close()
+
+                cog3 = AIFilterCog.__new__(AIFilterCog)
+                cog3.excluded_users = {}
+                cog3._db_path = db_path
+                cog3._connection = None
+                await cog3._initialize_db()
+                await cog3._load_settings()
+
+                self.assertEqual(cog3.excluded_users.get(10, set()), {1002})
+                await cog3._connection.close()
+            finally:
+                tmp.cleanup()
+
+        asyncio.run(scenario())
 
     def test_moderate_message_skips_disabled_guild(self) -> None:
         class DummyAuthor:
