@@ -1,9 +1,12 @@
 import datetime
+import time
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from cogs.command_helpers import banned_user_autocomplete
 
 
 class ModerationCog(commands.Cog, name="Moderation"):
@@ -22,16 +25,16 @@ class ModerationCog(commands.Cog, name="Moderation"):
         self,
         guild: discord.Guild,
         action: str,
-        target: discord.Member,
-        moderator: discord.Member,
+        target,
+        moderator,
         reason: str,
     ) -> None:
         channel = await self._get_mod_logs_channel(guild)
         if channel is None:
             return
         embed = discord.Embed(title=f"{action} executed", color=discord.Color.orange())
-        embed.add_field(name="Target", value=target.mention, inline=False)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Target", value=getattr(target, "mention", str(target)), inline=False)
+        embed.add_field(name="Moderator", value=getattr(moderator, "mention", str(moderator)), inline=False)
         embed.add_field(name="Reason", value=reason or "No reason provided", inline=False)
         await channel.send(embed=embed)
 
@@ -77,14 +80,21 @@ class ModerationCog(commands.Cog, name="Moderation"):
             await interaction.response.send_message(f"Failed to ban member: {exc}", ephemeral=True)
 
     @app_commands.command(name="unban", description="Unban a member from the server.")
-    @app_commands.describe(user_id="The user ID to unban", reason="Reason for the unban")
+    @app_commands.describe(user_id="The user to unban", reason="Reason for the unban")
     @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.autocomplete(user_id=banned_user_autocomplete)
     async def unban(self, interaction: discord.Interaction, user_id: str, reason: str = "No reason provided") -> None:
         try:
             user_id_int = int(user_id)
+        except ValueError:
+            await interaction.response.send_message("That doesn't look like a valid user ID.", ephemeral=True)
+            return
+        try:
             await interaction.guild.unban(discord.Object(user_id_int), reason=reason)
-            await self._log_action(interaction.guild, "Unban", interaction.guild.get_member(user_id_int) or discord.Object(user_id_int), interaction.user, reason)
+            await self._log_action(interaction.guild, "Unban", f"<@{user_id_int}>", interaction.user, reason)
             await interaction.response.send_message(f"User <@{user_id_int}> was unbanned.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.response.send_message("That user is not banned, or the ID is invalid.", ephemeral=True)
         except Exception as exc:
             await interaction.response.send_message(f"Failed to unban member: {exc}", ephemeral=True)
 
@@ -123,15 +133,97 @@ class ModerationCog(commands.Cog, name="Moderation"):
         except Exception as exc:
             await interaction.response.send_message(f"Failed to timeout member: {exc}", ephemeral=True)
 
-    @app_commands.command(name="unmute", description="Remove an active timeout from a member.")
-    @app_commands.describe(member="The member to remove the timeout from")
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def unmute(self, interaction: discord.Interaction, member: discord.Member) -> None:
+    async def _clear_timeout(self, interaction: discord.Interaction, member: discord.Member) -> None:
         try:
             await member.timeout(None, reason="Timeout cleared by moderator")
+            await self._log_action(interaction.guild, "Untimeout", member, interaction.user, "Timeout cleared by moderator")
             await interaction.response.send_message(f"Timeout removed from {member.mention}.", ephemeral=True)
         except Exception as exc:
             await interaction.response.send_message(f"Failed to remove timeout: {exc}", ephemeral=True)
+
+    @app_commands.command(name="untimeout", description="Remove an active timeout from a member.")
+    @app_commands.describe(member="The member to remove the timeout from")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def untimeout(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        await self._clear_timeout(interaction, member)
+
+    @app_commands.command(name="unmute", description="Alias for /untimeout — remove an active timeout from a member.")
+    @app_commands.describe(member="The member to remove the timeout from")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def unmute(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        await self._clear_timeout(interaction, member)
+
+    async def _purge_messages(
+        self,
+        channel: discord.TextChannel,
+        *,
+        limit: int,
+        check=None,  # Optional[Callable[[discord.Message], bool]]
+    ) -> int:
+        """Delete up to ``limit`` messages, tolerating messages that vanish mid-purge.
+
+        Discord's bulk-delete endpoint fails with 404 "Unknown Message" if any
+        message in the batch is already gone (e.g. the AI filter deleted it while
+        this purge was running). Rather than letting one bad batch abort the whole
+        purge, we fall back to deleting each message individually and keep going.
+        Messages older than 14 days cannot be bulk-deleted, so those are always
+        deleted one by one.
+        """
+        deleted = 0
+        batch: list[discord.Message] = []
+
+        # Bulk delete only works for messages younger than 14 days. Older messages
+        # must be deleted individually (mirrors discord.py's own purge logic).
+        minimum_time = int((time.time() - 14 * 24 * 60 * 60) * 1000.0 - 1420070400000) << 22
+        use_bulk = True
+
+        async for message in channel.history(limit=limit):
+            if check is not None and not check(message):
+                continue
+            if not message.type.is_deletable():
+                continue
+
+            if message.id < minimum_time:
+                use_bulk = False
+
+            if use_bulk:
+                batch.append(message)
+                if len(batch) >= 100:
+                    deleted += await self._delete_batch(channel, batch)
+                    batch = []
+            else:
+                deleted += await self._delete_single(message)
+
+        deleted += await self._delete_batch(channel, batch)
+        return deleted
+
+    async def _delete_batch(self, channel: discord.TextChannel, messages: list) -> int:
+        """Bulk-delete a batch; on failure, fall back to deleting one by one.
+
+        ``discord.Forbidden`` is deliberately not caught here so it bubbles up to
+        the command's permission-specific handler; other HTTP errors (e.g. a
+        message vanishing mid-purge) fall back to individual deletes.
+        """
+        if not messages:
+            return 0
+        try:
+            await channel.delete_messages(messages, reason="Purge command")
+            return len(messages)
+        except discord.Forbidden:
+            raise
+        except discord.HTTPException:
+            count = 0
+            for message in messages:
+                count += await self._delete_single(message)
+            return count
+
+    async def _delete_single(self, message) -> int:
+        """Delete one message, counting it only if it still exists."""
+        try:
+            await message.delete()
+            return 1
+        except discord.NotFound:
+            return 0
 
     @app_commands.command(name="purge", description="Delete recent messages in a channel.")
     @app_commands.describe(amount="How many messages to remove", member_optional="Optional member filter")
@@ -152,10 +244,69 @@ class ModerationCog(commands.Cog, name="Moderation"):
         try:
             await interaction.response.defer(ephemeral=True)
             if member_optional is None:
-                deleted = await channel.purge(limit=amount)
+                deleted = await self._purge_messages(channel, limit=amount)
             else:
-                deleted = await channel.purge(limit=amount, check=lambda message: message.author == member_optional)
-            await interaction.followup.send(f"Deleted {len(deleted)} message(s).", ephemeral=True)
+                deleted = await self._purge_messages(channel, limit=amount, check=lambda message: message.author == member_optional)
+            await interaction.followup.send(f"Deleted {deleted} message(s).", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I need the Manage Messages permission to purge messages.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Failed to purge messages: {exc}", ephemeral=True)
+
+    async def _purge_member_across_channels(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        limit: int,
+    ) -> int:
+        """Delete up to ``limit`` messages from ``member`` across every text channel.
+
+        Includes threads so the purge is genuinely server-wide. Channels the bot
+        cannot act in are skipped rather than aborting the whole operation.
+        Reuses the resilient per-channel purge (bulk delete with a single-delete
+        fallback) so a message vanishing mid-purge never errors out.
+        """
+        total = 0
+        channels = list(guild.text_channels) + list(guild.threads)
+        for channel in channels:
+            permissions = channel.permissions_for(guild.me)
+            if not permissions.manage_messages or not permissions.read_message_history:
+                continue
+            try:
+                total += await self._purge_messages(
+                    channel,
+                    limit=limit,
+                    check=lambda message: message.author == member,
+                )
+            except discord.HTTPException:
+                continue
+        return total
+
+    @app_commands.command(name="purgeuser", description="Delete a specific user's messages across the whole server.")
+    @app_commands.describe(member="The member whose messages to delete", amount="How many messages to search per channel")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purgeuser(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        amount: int = 100,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if amount < 1 or amount > 100:
+            await interaction.response.send_message("Amount must be between 1 and 100.", ephemeral=True)
+            return
+        try:
+            await interaction.response.defer(ephemeral=True)
+            total = await self._purge_member_across_channels(interaction.guild, member, limit=amount)
+            await interaction.followup.send(
+                f"Deleted {total} message(s) from {member.mention} across the server.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("I need the Manage Messages permission to purge messages.", ephemeral=True)
         except Exception as exc:
             await interaction.followup.send(f"Failed to purge messages: {exc}", ephemeral=True)
 

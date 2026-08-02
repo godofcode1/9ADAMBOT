@@ -28,16 +28,26 @@ class ModerationBot(commands.Bot):
         self.ai_client = None
 
     async def setup_hook(self) -> None:
-        token = os.getenv("DISCORD_TOKEN")
         openai_key = os.getenv("OPENAI_API_KEY")
-        if token:
-            self.ai_client = AsyncOpenAI(api_key=openai_key) if openai_key else None
+        if openai_key:
+            self.ai_client = AsyncOpenAI(api_key=openai_key)
+            print("[startup] OpenAI moderation client enabled.")
+        else:
+            self.ai_client = None
+            print("[startup] OPENAI_API_KEY not set; AI filter will only use the local slur list.")
         await self.load_all_cogs()
+
+    async def sync_guild_commands(self, guild: discord.Guild) -> None:
+        try:
+            await self.tree.sync(guild=discord.Object(guild.id))
+            print(f"Slash commands synced for {guild.name}.")
+        except Exception as exc:
+            print(f"Failed to sync commands for {guild.name}: {exc}")
 
     async def load_all_cogs(self) -> None:
         cogs_dir = Path(__file__).resolve().parent / "cogs"
         for cog_file in sorted(cogs_dir.glob("*.py")):
-            if cog_file.name.startswith("__"):
+            if cog_file.name.startswith("__") or cog_file.name == "command_helpers.py":
                 continue
             cog_name = f"cogs.{cog_file.stem}"
             try:
@@ -53,12 +63,10 @@ class ModerationBot(commands.Bot):
             return
 
         for guild in self.guilds:
-            try:
-                await self.tree.sync(guild=discord.Object(guild.id))
-            except Exception as exc:
-                print(f"Failed to sync commands for {guild.name}: {exc}")
+            await self.sync_guild_commands(guild)
 
-        print("Slash commands synced for the current guilds.")
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self.sync_guild_commands(guild)
 
 
 if __name__ == "__main__":

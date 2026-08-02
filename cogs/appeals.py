@@ -3,21 +3,32 @@ from discord.ext import commands
 
 
 class SubmitAppealButton(discord.ui.Button):
-    def __init__(self, member: discord.Member, action: str, reason: str) -> None:
+    def __init__(self, bot: commands.Bot, member: discord.Member, guild_id: int, action: str, reason: str) -> None:
         super().__init__(label="Submit Appeal", style=discord.ButtonStyle.primary)
+        self.bot = bot
         self.member = member
+        self.guild_id = guild_id
         self.action = action
         self.reason = reason
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        modal = AppealModal(self.member, self.action, self.reason)
+        modal = AppealModal(self.bot, self.member, self.guild_id, self.action, self.reason)
         await interaction.response.send_modal(modal)
 
 
 class AppealModal(discord.ui.Modal, title="Appeal Submission"):
-    def __init__(self, member: discord.Member, action: str, reason: str) -> None:
+    def __init__(
+        self,
+        bot: commands.Bot,
+        member: discord.Member,
+        guild_id: int,
+        action: str,
+        reason: str,
+    ) -> None:
         super().__init__(timeout=600)
+        self.bot = bot
         self.member = member
+        self.guild_id = guild_id
         self.action = action
         self.reason = reason
         self.penalty_reason = discord.ui.TextInput(label="Why were you penalized?", style=discord.TextStyle.paragraph)
@@ -26,14 +37,26 @@ class AppealModal(discord.ui.Modal, title="Appeal Submission"):
         self.add_item(self.lift_reason)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        guild = interaction.guild
+        guild = self.bot.get_guild(self.guild_id)
         if guild is None:
-            await interaction.response.send_message("This modal can only be used in a guild.", ephemeral=True)
+            try:
+                guild = await self.bot.fetch_guild(self.guild_id)
+            except Exception:
+                guild = None
+
+        if guild is None:
+            await interaction.response.send_message(
+                "I could not find the server for this appeal. Contact staff directly.",
+                ephemeral=True,
+            )
             return
 
         appeals_channel = await self._get_appeals_channel(guild)
         if appeals_channel is None:
-            await interaction.response.send_message("No appeals channel is configured and I cannot create one without channel permissions.", ephemeral=True)
+            await interaction.response.send_message(
+                "No appeals channel is configured and I cannot create one without channel permissions.",
+                ephemeral=True,
+            )
             return
 
         embed = discord.Embed(title="New Appeal Submitted", color=discord.Color.blurple())
@@ -119,9 +142,9 @@ class AppealsCog(commands.Cog, name="Appeals"):
     async def send_penalty_dm(self, member: discord.Member, action: str, reason: str) -> None:
         try:
             view = discord.ui.View(timeout=1800)
-            view.add_item(SubmitAppealButton(member, action, reason))
+            view.add_item(SubmitAppealButton(self.bot, member, member.guild.id, action, reason))
             await member.send(
-                f"You were {action} in this server. If you believe this was incorrect, you can submit an appeal.",
+                f"You were {action} in {member.guild.name}. If you believe this was incorrect, you can submit an appeal.",
                 view=view,
             )
         except Exception:
