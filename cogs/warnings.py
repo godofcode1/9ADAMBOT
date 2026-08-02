@@ -1,7 +1,6 @@
 import datetime
 import re
 import shutil
-from pathlib import Path
 from typing import Optional
 
 import aiosqlite
@@ -9,13 +8,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.command_helpers import get_data_dir
+
 
 class WarningsCog(commands.Cog, name="Warnings"):
     """Manage infractions, warning history, and automatic escalation."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.base_dir = Path(__file__).resolve().parent.parent
+        self.base_dir = get_data_dir()
         self.db_path = self.base_dir / "moderation.db"
         self.legacy_db_path = self.base_dir / "warnings.db"
         self._connection: Optional[aiosqlite.Connection] = None

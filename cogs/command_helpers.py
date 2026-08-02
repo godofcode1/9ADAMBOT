@@ -1,7 +1,26 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import discord
 from discord import app_commands
+
+
+def get_data_dir() -> Path:
+    """Return the directory for persistent runtime data (SQLite databases).
+
+    On hosted platforms (Railway, Render, etc.) the local filesystem is wiped
+    on every redeploy, so the ``DATA_DIR`` environment variable should point at
+    a mounted persistent volume. Locally it falls back to the project root.
+    """
+    env_dir = os.getenv("DATA_DIR")
+    if env_dir:
+        data_dir = Path(env_dir)
+    else:
+        data_dir = Path(__file__).resolve().parent.parent
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 
 async def member_autocomplete(

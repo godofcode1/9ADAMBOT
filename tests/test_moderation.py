@@ -1,10 +1,13 @@
 import asyncio
+import os
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
 
 import discord
 
+from cogs.command_helpers import get_data_dir
 from cogs.moderation import ModerationCog
 
 
@@ -59,6 +62,38 @@ class DummyChannel:
         if self.bulk_fails:
             raise _not_found()
         self.deleted_messages.extend(messages)
+
+
+class CommandHelpersTests(unittest.TestCase):
+    def test_get_data_dir_uses_data_dir_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("DATA_DIR")
+            os.environ["DATA_DIR"] = tmp
+            try:
+                data_dir = get_data_dir()
+            finally:
+                if old is None:
+                    os.environ.pop("DATA_DIR", None)
+                else:
+                    os.environ["DATA_DIR"] = old
+
+            self.assertEqual(str(data_dir), tmp)
+            self.assertTrue(data_dir.exists())
+
+    def test_get_data_dir_creates_missing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "nested", "data")
+            old = os.environ.get("DATA_DIR")
+            os.environ["DATA_DIR"] = target
+            try:
+                data_dir = get_data_dir()
+            finally:
+                if old is None:
+                    os.environ.pop("DATA_DIR", None)
+                else:
+                    os.environ["DATA_DIR"] = old
+
+            self.assertTrue(data_dir.exists())
 
 
 class ModerationCogTests(unittest.TestCase):

@@ -1,11 +1,12 @@
 import re
-from pathlib import Path
 from typing import Optional
 
 import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from cogs.command_helpers import get_data_dir
 
 # Categories where a lower score threshold is enough to act.
 _SENSITIVE_CATEGORIES = frozenset(
@@ -43,7 +44,7 @@ class AIFilterCog(commands.Cog, name="AI Filter"):
         self._disabled_guilds: set[int] = set()
         self._custom_words: dict[int, set[str]] = {}
         self._connection: Optional[aiosqlite.Connection] = None
-        self._db_path = Path(__file__).resolve().parent.parent / "filter.db"
+        self._db_path = get_data_dir() / "filter.db"
 
     async def _get_mod_logs_channel(self, guild: discord.Guild):
         for channel in guild.text_channels:
